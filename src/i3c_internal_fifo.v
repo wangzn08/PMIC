@@ -1,120 +1,39 @@
-/*--------------------------------------------------------------------
-  Copyright (C) 2015-2019, NXP B.V.
-  All rights reserved.
-  
-  Redistribution and use in source and binary forms, with or without 
-  modification, are permitted provided that the following conditions 
-  are met:
-  
-  1. Redistributions of source code must retain the above copyright 
-     notice, this list of conditions and the following disclaimer.
-  
-  2. Redistributions in binary form must reproduce the above copyright 
-     notice, this list of conditions and the following disclaimer in
-     the documentation and/or other materials provided with the 
-     distribution.
-  
-  3. Neither the name of the copyright holder nor the names of its 
-     contributors may be used to endorse or promote products derived 
-     from this HDL software without specific prior written permission.
-  
-  THIS (HDL) SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
-  CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
-  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
-  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
-  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
-  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT 
-  NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
-  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
-  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
-  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
-  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, 
-  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+`include "i3c_params.v"                 // 本地参数/常量
 
-  NOTE: No license under any third-party patent is granted or implied. 
-        It is the responsibility of the licensee to obtain any required 
-        third-party patent licenses.
-
-  Note on terms used above:
-  1. Software and HDL software are used interchangeably.
-  2. Binary includes FPGA, simulation, and physical forms such 
-     as Silicon chips.
-  3. Clause 2 allows for such notice on a Web page or other 
-     electronic form not part of a distribution.
-  The original BSD source is available from:
-    https://github.com/NXP/i3c-slave-design
-  -------------------------------------------------------------------- */
-
-//
-//  ----------------------------------------------------------------------------
-//                    Design Information
-//  ----------------------------------------------------------------------------
-//  File            : i3c_internal_fifo.v
-//  Organisation    : MCO
-//  Tag             : 1.1.11
-//  Date            : $Date: Thu Nov 14 12:28:26 2019 $
-//  Revision        : $Revision: 1.62 $
-//
-//  IP Name         : i3c_internal_fifo 
-//  Description     : MIPI I3C optional FIFO when enabled
-//    This contains support for Sunburst design style FIFOs across
-//    the clock domains - System and SCL. 
-//    This file contains 4 modules:
-//    1. The To-bus FIFO support, including FIFO mem
-//    2. The From-bus FIFO support, including FIFO mem
-//    3. The Write side FIFO control
-//    4. The Read side FIFO control
-//
-//  ----------------------------------------------------------------------------
-//                    Revision History
-//  ----------------------------------------------------------------------------
-//
-//
-//  ----------------------------------------------------------------------------
-//                    Implementation details
-//  ----------------------------------------------------------------------------
-//  See the micro-arch spec and MIPI I3C spec
-//
-//    This implements two low level FIFO controls for clock crossing.
-//    It then instantiates one for from-bus and one for to-bus
-//    Note that forcing the fifo to empty is handled by using reset
-//    in system clock domain, which is safe as long as no actions
-//    are trying to take place on reset release (which may be on clock
-//    boundary).
-//  ----------------------------------------------------------------------------
-
-`include "i3c_params.v"                 // local parameters/constants
-
-// To-bus uses CLK to write, and SCL to read
+// ============================================================================
+// 模块：i3c_internal_tb_fifo
+// 功能：I3C内部到总线FIFO模块（发送方向）
+// 描述：实现从系统时钟域(CLK)到I3C总线时钟域(SCL)的数据缓冲和时钟域交叉
+//       支持可配置深度的FIFO，可选的保持缓冲，以及触发中断控制
+// ============================================================================
 module i3c_internal_tb_fifo #(
-    parameter BITS = 3,                 // size in bits (2^BITS)
-    parameter USE_HOLDING = 0           // 1 if holding buff
+    parameter BITS = 3,                 // FIFO深度位数（2^BITS）
+    parameter USE_HOLDING = 0           // 是否使用保持缓冲（1=是）
   )
   (
-  input               RSTn,             // global reset
-  input               CLK,              // system clock (bus or other)
-  input               SCL,              // passed up from SDR - not SCL_n
-  input               SCL_n,            // passed up from SDR - SCL_n
-  // now nets in CLK domain to memory mapped registers or nets
-  input               avail_tb_ready,   // to-bus byte is ready
-  input         [7:0] avail_tb_data,    // byte
-  output              avail_tb_ack,     // we have used byte
-  input               avail_tb_end,     // last one - with ready
-  input               tb_flush,         // 1 cycle pulse to flush buff
-  output              avail_tb_full,    // truly full (not trig)
-  // next is FIFO count even if no FIFO
-  output        [4:0] avail_byte_cnt,   // count in bytes in FIFO
-  input         [1:0] tx_trig,          // trigger percent
-  output              int_tb,           // set when TX not full/trig
-  // now nets in SCL_n domain
-  output              tb_data_valid,    // b1 if full, b0 if empty
-  output        [7:0] tb_datab,         // data for them to use if valid
-  output              tb_end,           // held until data consumed
-  input               tb_datab_ack,     // ack for 1 SCL_n clock when consumed
-  input               scan_no_rst       // prevents layered reset
+  input               RSTn,             // 全局复位
+  input               CLK,              // 系统时钟
+  input               SCL,              // I3C总线时钟
+  input               SCL_n,            // I3C总线反向时钟
+  // CLK域接口：来自寄存器或逻辑
+  input               avail_tb_ready,   // 到总线数据准备就绪
+  input         [7:0] avail_tb_data,    // 数据字节
+  output              avail_tb_ack,     // 数据已接收确认
+  input               avail_tb_end,     // 最后一个字节标志（与ready同时有效）
+  input               tb_flush,         // 缓冲刷新脉冲
+  output              avail_tb_full,    // FIFO真正满标志（非触发）
+  output        [4:0] avail_byte_cnt,   // FIFO中字节计数
+  input         [1:0] tx_trig,          // 发送触发阈值百分比
+  output              int_tb,           // 发送中断（FIFO非满/达到触发条件）
+  // SCL域接口：到I3C总线
+  output              tb_data_valid,    // 数据有效标志
+  output        [7:0] tb_datab,         // 发送数据
+  output              tb_end,           // 最后字节标志
+  input               tb_datab_ack,     // 数据消耗确认（SCL_n时钟域）
+  input               scan_no_rst       // 扫描测试时禁止分层复位
   );
 
+  // 内部信号声明
   wire       [BITS:0] rclk_wgray, wclk_rgray;
   wire                read_empty, write_full;
   wire       [BITS:0] export_rgray, export_wgray;
@@ -126,48 +45,50 @@ module i3c_internal_tb_fifo #(
   wire          [1:0] match;
   reg                 trig;
   wire     [BITS-1:0] hold_next_idx;
-  // actual FIFO
-  reg           [8:0] tb_fifo[0:(1<<BITS)-1]; // a memory. Note 9 bits
+  // FIFO存储器：9位宽度（8位数据+1位结束标志）
+  reg           [8:0] tb_fifo[0:(1<<BITS)-1];
   wire          [8:0] opt_holding;
   wire                write_one;
 
-  // we sync between: write in CLK, read in SCL
+  // 时钟域同步：写指针（CLK域）同步到读时钟域（SCL域）
   SYNC_S2C #(.WIDTH(BITS+1)) w2r (.rst_n(RSTn), .clk(SCL), .scl_data(export_wgray), 
                           .out_clk(rclk_wgray));
+  // 时钟域同步：读指针（SCL域）同步到写时钟域（CLK域）
   SYNC_S2C #(.WIDTH(BITS+1)) r2w (.rst_n(RSTn), .clk(CLK), .scl_data(export_rgray), 
                           .out_clk(wclk_rgray));
 
-  // flush clears everthing by reset, released on next clock (sync)
+  // 复位逻辑：支持刷新操作
   assign reset_flush_n = RSTn & (~tb_flush | scan_no_rst);
 
-  // tobus means we write from CLK and we read from SCL
+  // FIFO写控制模块
   i3c_internal_fifo_write #(.BITS(BITS)) tb_wr_fifo(.RSTn(reset_flush_n), .WCLK(CLK), 
                                      .write_one(write_one), .wclk_rgray(wclk_rgray),
                                      .write_full(write_full), .export_wgray(export_wgray), 
                                      .write_idx(write_idx));
+  // FIFO读控制模块
   i3c_internal_fifo_read #(.BITS(BITS)) tb_rd_fifo(.RSTn(reset_flush_n), .RCLK(SCL), 
                                      .read_one(tb_datab_ack), .rclk_wgray(rclk_wgray), 
                                      .read_empty(read_empty), .export_rgray(export_rgray), 
                                      .read_idx(read_idx), .next_read_idx(hold_next_idx));
 
-  // ack is the 1 cycle push operation (write_one)
+  // 写控制逻辑
   assign write_one = avail_tb_ready & ~write_full;
   always @ (posedge CLK or negedge RSTn)
     if (~RSTn)
       wr_ack <= 1'b0;
     else if (write_one)
-      wr_ack <= 1'b1;           // we can push over multiple cycles
+      wr_ack <= 1'b1;           // 支持多周期推送
     else 
       wr_ack <= 1'b0;
-  assign avail_tb_ack   = wr_ack; // accepted byte
-  assign tb_data_valid  = ~read_empty;
-  assign tb_datab       = opt_holding[7:0];
-  assign tb_end         = opt_holding[8] & tb_data_valid;
+  assign avail_tb_ack   = wr_ack;     // 字节接收确认
+  assign tb_data_valid  = ~read_empty; // 数据有效（FIFO非空）
+  assign tb_datab       = opt_holding[7:0]; // 输出数据
+  assign tb_end         = opt_holding[8] & tb_data_valid; // 结束标志
 
-  // now build holding buffer if they want - isolates from FIFO
+  // 保持缓冲生成逻辑
   generate if (USE_HOLDING) begin : to_bus_holding
-    reg       [8:0] holding;
-    reg  [BITS-1:0] last_idx;
+    reg       [8:0] holding;           // 保持缓冲寄存器
+    reg  [BITS-1:0] last_idx;          // 上次读取索引
     wire [BITS-1:0] use_idx = (tb_datab_ack & ~read_empty) ? hold_next_idx : read_idx;
     always @ (posedge SCL or negedge RSTn)
       if (!RSTn) begin
@@ -175,46 +96,46 @@ module i3c_internal_tb_fifo #(
         last_idx  <= {BITS{1'b0}};
       end else if ((last_idx != use_idx) |
                    (holding != tb_fifo[use_idx])) begin
-        // note: I do not like this compare. Would rather check
-        // if write has happened, but for now...
+        // 当索引变化或FIFO内容更新时更新保持缓冲
         holding   <= tb_fifo[use_idx];
         last_idx  <= use_idx;
       end
-    assign opt_holding = holding;
+    assign opt_holding = holding;      // 使用保持缓冲输出
   end else begin
-    assign opt_holding = tb_fifo[read_idx];
+    assign opt_holding = tb_fifo[read_idx]; // 直接FIFO输出
   end endgenerate
 
-  // FIFO memory needs no reset since we write 1st
-  // But, we use here to make easier for DFT
+  // FIFO存储器写入逻辑
   integer ini;
   always @ (posedge CLK or negedge RSTn)
     if (~RSTn) begin
+      // DFT考虑：复位FIFO内容
       for (ini = 0; ini < (1<<BITS); ini = ini + 1)
         tb_fifo[ini]     <= 9'd0;
     end else if (avail_tb_ready & ~write_full)
-      tb_fifo[write_idx] <= {avail_tb_end, avail_tb_data};
+      tb_fifo[write_idx] <= {avail_tb_end, avail_tb_data}; // 写入数据和结束标志
     
-  // we need to produce the available bytes value which is hard as is, 
-  // but we make read gray into normal number and then subtract
-  assign wr_is_empty    = export_wgray == wclk_rgray;
-  assign avail_tb_full  = write_full;
-  assign tmp            = (write_idx-local_ridx);
+  // FIFO状态计算：字节计数和中断触发
+  assign wr_is_empty    = export_wgray == wclk_rgray; // 写空判断
+  assign avail_tb_full  = write_full;                 // 满标志
+  assign tmp            = (write_idx-local_ridx);     // 写读索引差
+  // 字节计数计算
   assign avail_byte_cnt = tmp[(BITS-1):0] ? tmp[(BITS-1):0] : wr_is_empty ? 5'd0 : (5'd1<<BITS);
-  assign match          = tmp[(BITS-1) -: 2];   // top two bits
-  assign int_tb         = write_full ? 1'b0 : // never on full
-                          wr_is_empty ? 1'b1 :// always on empty
-                          trig;               // else percentage
+  assign match          = tmp[(BITS-1) -: 2];         // 高两位用于满判断
+  // 中断生成逻辑
+  assign int_tb         = write_full ? 1'b0 :         // 满时无中断
+                          wr_is_empty ? 1'b1 :        // 空时总有中断
+                          trig;                       // 否则根据触发阈值
   always @ ( * )
-    case (tx_trig)
-    2'b00:   trig = wr_is_empty;        // only if empty
-    2'b01:   trig = tmp[(BITS-1):0] <= (1<<BITS)/4;
-    2'b10:   trig = tmp[(BITS-1):0] <= (1<<BITS)/2;
-    2'b11:   trig = 1'b1;               // anything but full
+    case (tx_trig)        // 触发阈值配置
+    2'b00:   trig = wr_is_empty;        // 仅空时触发
+    2'b01:   trig = tmp[(BITS-1):0] <= (1<<BITS)/4; // 25%以下
+    2'b10:   trig = tmp[(BITS-1):0] <= (1<<BITS)/2; // 50%以下
+    2'b11:   trig = 1'b1;               // 非满即触发
     default: trig = 1'b0;
     endcase
 
-  // Conversion is just XOR of upper to current
+  // 格雷码转二进制：同步的读指针转换为二进制索引
   genvar i;
   generate for (i = BITS-1; i >= 0; i = i -1) begin : tb_gen_num
     assign local_ridx[i] = ^wclk_rgray[BITS:i];
@@ -222,32 +143,37 @@ module i3c_internal_tb_fifo #(
 
 endmodule
 
-// From-bus uses SCL to write and CLK to read
-// Note that control is still on CLK side
+// ============================================================================
+// 模块：i3c_internal_fb_fifo
+// 功能：I3C内部从总线FIFO模块（接收方向）
+// 描述：实现从I3C总线时钟域(SCL)到系统时钟域(CLK)的数据缓冲和时钟域交叉
+//       支持可配置深度的FIFO，以及接收中断触发控制
+// ============================================================================
 module i3c_internal_fb_fifo #(
-    parameter BITS = 3                  // size in bits (so 2^BITS)
+    parameter BITS = 3                  // FIFO深度位数（2^BITS）
   )
   (
-  input               RSTn,             // global reset
-  input               CLK,              // system clock (bus or other)
-  input               SCL,              // passed up from SDR - not SCL_n
-  input               SCL_n,            // passed up from SDR - SCL_n
-  // now nets in CLK domain to memory mapped registers or nets
-  output              notify_fb_ready,  // from-bus byte is ready     
-  output        [7:0] notify_fb_data,   // byte
-  input               notify_fb_ack,    // byte taken
-  input               fb_flush,         // 1 cycle pulse to flush buff
-  output              avail_fb_empty,   // truly empty not trig
-  output        [4:0] avail_byte_cnt,   // count in bytes in FIFO
-  input         [1:0] rx_trig,          // trigger for FIFO
-  output              int_rx,           // RX not empty or trigger 
-  // now nets in SCL_n domain
-  output              fb_data_use,      // b01, b10, or b00 (full)
-  input         [7:0] fb_datab,         // output byte to system if done=1 and use=01
-  input               fb_datab_done,    // done pulsed for one clk_SCL_n when written
-  input               scan_no_rst       // prevents layered reset
+  input               RSTn,             // 全局复位
+  input               CLK,              // 系统时钟
+  input               SCL,              // I3C总线时钟
+  input               SCL_n,            // I3C总线反向时钟
+  // CLK域接口：到寄存器或逻辑
+  output              notify_fb_ready,  // 从总线数据准备就绪
+  output        [7:0] notify_fb_data,   // 数据字节
+  input               notify_fb_ack,    // 数据已取走确认
+  input               fb_flush,         // 缓冲刷新脉冲
+  output              avail_fb_empty,   // FIFO真正空标志（非触发）
+  output        [4:0] avail_byte_cnt,   // FIFO中字节计数
+  input         [1:0] rx_trig,          // 接收触发阈值百分比
+  output              int_rx,           // 接收中断（FIFO非空/达到触发条件）
+  // SCL域接口：从I3C总线
+  output              fb_data_use,      // 数据可使用标志（非满）
+  input         [7:0] fb_datab,         // 接收数据
+  input               fb_datab_done,    // 数据写入完成脉冲
+  input               scan_no_rst       // 扫描测试时禁止分层复位
   );
 
+  // 内部信号声明
   wire       [BITS:0] rclk_wgray, wclk_rgray;
   wire                read_empty, write_full;
   wire       [BITS:0] export_rgray, export_wgray;
@@ -257,58 +183,62 @@ module i3c_internal_fb_fifo #(
   wire          [1:0] match;
   reg                 trig;
   wire     [BITS-1:0] unused2;
-  // actual FIFO
-  reg           [7:0] fb_fifo[0:(1<<BITS)-1]; // a memory. Note 8 bits
+  // FIFO存储器：8位宽度
+  reg           [7:0] fb_fifo[0:(1<<BITS)-1];
 
-  // we sync between: write in SCL, read in CLK
+  // 时钟域同步：写指针（SCL域）同步到读时钟域（CLK域）
   SYNC_S2C #(.WIDTH(BITS+1)) w2r (.rst_n(RSTn), .clk(CLK), .scl_data(export_wgray), 
                           .out_clk(rclk_wgray));
+  // 时钟域同步：读指针（CLK域）同步到写时钟域（SCL域）
   SYNC_S2C #(.WIDTH(BITS+1)) r2w (.rst_n(RSTn), .clk(SCL), .scl_data(export_rgray), 
                           .out_clk(wclk_rgray));
 
-  // flush clears everthing by reset, released on next clock (sync)
+  // 复位逻辑：支持刷新操作
   assign reset_flush_n = RSTn & (~fb_flush | scan_no_rst);
 
-  // tobus means we write from CLK and we read from SCL
+  // FIFO写控制模块（SCL域）
   i3c_internal_fifo_write #(.BITS(BITS)) fb_wr_fifo(.RSTn(reset_flush_n), .WCLK(SCL),
                                      .write_one(fb_datab_done), .wclk_rgray(wclk_rgray),
                                      .write_full(write_full), .export_wgray(export_wgray), 
                                      .write_idx(write_idx));
+  // FIFO读控制模块（CLK域）
   i3c_internal_fifo_read #(.BITS(BITS)) fb_rd_fifo(.RSTn(reset_flush_n), .RCLK(CLK), .read_one(notify_fb_ack), 
                                      .rclk_wgray(rclk_wgray), 
                                      .read_empty(read_empty), .export_rgray(export_rgray), 
                                      .read_idx(read_idx), .next_read_idx(unused2));
 
-  assign notify_fb_ready= ~read_empty;  // data waiting
-  assign notify_fb_data = fb_fifo[read_idx];
-  assign fb_data_use    = write_full ? 1'b0 : 1'b1; 
+  // 输出信号赋值
+  assign notify_fb_ready= ~read_empty;  // 数据等待标志
+  assign notify_fb_data = fb_fifo[read_idx]; // 读取数据
+  assign fb_data_use    = write_full ? 1'b0 : 1'b1; // 可使用标志（非满）
 
-  // FIFO memory has no reset since we write 1st
+  // FIFO存储器写入逻辑（SCL域）
   always @ (posedge SCL)
     if (fb_datab_done & ~write_full)
       fb_fifo[write_idx] <= fb_datab; 
     
-  // we need to produce the available bytes value which is hard as is, 
-  // but we make read gray into normal number and then subtract
-  assign tmp            = (local_widx-read_idx);
+  // FIFO状态计算：字节计数和中断触发
+  assign tmp            = (local_widx-read_idx); // 写读索引差
+  // 字节计数计算
   assign avail_byte_cnt = tmp[(BITS-1):0] ? tmp[(BITS-1):0] : 
                              read_empty ? 5'd0 : (5'd1<<BITS);
-  assign match          = tmp[(BITS-1) -: 2];// top two bits
-  assign int_rx         = read_empty ? 1'b0 :// never on empty
-                          ~|tmp[(BITS-1):0] ? 1'b1 : // full
-                          trig;              // else percentage
-  assign avail_fb_empty = read_empty;
+  assign match          = tmp[(BITS-1) -: 2]; // 高两位
+  // 中断生成逻辑
+  assign int_rx         = read_empty ? 1'b0 : // 空时无中断
+                          ~|tmp[(BITS-1):0] ? 1'b1 : // 满时总有中断
+                          trig;              // 否则根据触发阈值
+  assign avail_fb_empty = read_empty;       // 空标志
 
   always @ ( * )
-    case (rx_trig)
-    2'b00:   trig = 1'b1;               // anything but empty
-    2'b01:   trig = tmp[(BITS-1):0] >= (1<<BITS)/4;
-    2'b10:   trig = tmp[(BITS-1):0] >= (1<<BITS)/2;
-    2'b11:   trig = tmp[(BITS-1):0] >= ((1<<BITS)/4)*3;
+    case (rx_trig)        // 触发阈值配置
+    2'b00:   trig = 1'b1;               // 非空即触发
+    2'b01:   trig = tmp[(BITS-1):0] >= (1<<BITS)/4; // 25%以上
+    2'b10:   trig = tmp[(BITS-1):0] >= (1<<BITS)/2; // 50%以上
+    2'b11:   trig = tmp[(BITS-1):0] >= ((1<<BITS)/4)*3; // 75%以上
     default: trig = 1'b0;
     endcase
 
-  // Conversion is just XOR of upper to current
+  // 格雷码转二进制：同步的写指针转换为二进制索引
   genvar i;
   generate  for (i = BITS-1; i >= 0; i = i -1) begin : fb_gen_num
     assign local_widx[i] = ^rclk_wgray[BITS:i];
@@ -317,127 +247,107 @@ module i3c_internal_fb_fifo #(
 endmodule
 
 
-// FIFO for write side. Based on Sunburst design FIFO
-// -- Note that we do not register full since short paths
-module i3c_internal_fifo_write #(parameter BITS=3) // bit size, so 2^BITS
+// ============================================================================
+// 模块：i3c_internal_fifo_write
+// 功能：FIFO写侧控制模块（基于Sunburst设计）
+// 描述：管理FIFO的写指针、满状态判断和格雷码生成
+//       注意：满状态使用组合逻辑实现以缩短路径延迟
+// ============================================================================
+module i3c_internal_fifo_write #(parameter BITS=3) // 位宽参数（深度2^BITS）
   (
-  input               RSTn,             // global reset
-  input               WCLK,             // clock of write side (CLK or SCL)
-  input               write_one,        // want to push new value (if not full)
-  input      [BITS:0] wclk_rgray,       // read gray count sync to our domain
-  output              write_full,       // is full, else can write
-  output     [BITS:0] export_wgray,     // our exported gray count
-  output   [BITS-1:0] write_idx         // index into FIFO
+  input               RSTn,             // 全局复位
+  input               WCLK,             // 写时钟（CLK或SCL）
+  input               write_one,        // 写请求（非满时可写入）
+  input      [BITS:0] wclk_rgray,       // 同步到本域的读侧格雷码指针
+  output              write_full,       // FIFO满标志
+  output     [BITS:0] export_wgray,     // 输出到其他时钟域的格雷码指针
+  output   [BITS-1:0] write_idx         // 写索引（FIFO地址）
   );
  
-  // notes:
-  // 1. Write side only cares about full or not full since we
-  //    can write if not full, else we cannot.
-  // 2. Can only get full by us writing (pushing)
-  //    -- So detected as it happens in this (wclk) domain
-  //    -- This is safe since it cannot over write regardless
-  //       of ratio of clocks
-  // 3. Change to Not-full synchronized from read side, so delayed
-  //    -- Which only menas it takes longer before we can write
-  //       a new value, but no risk
-  // Model of use is counters are 1 bit larger than needed to index
-  // FIFO. This allows us to separate ridx==widx as emprt vs. as
-  // 2. Can only get empty by us reading, so clocked to rclk
-  // 3. Not empty synchronized from write side, so delayed
-  // -- So, naturally safe
-  // Model of use is counters are 1 bit larger than needed to index
-  // FIFO. This allows us to separate ridx==widx is empty vs. full.
-  // The extra bit means empty is r==w and full differs by MSB
+  // 设计说明：
+  // 1. 写侧只关心满状态，非满时可写入
+  // 2. 满状态只能由本侧写入操作产生，在本时钟域检测是安全的
+  // 3. 非满状态从读侧同步而来，可能有延迟，但只影响写入时机，无风险
+  // 计数器比FIFO索引多1位，用于区分空满状态：
+  //   空：读写指针相等；满：读写指针最高位和次高位不同，其余位相等
   reg     [BITS:0] write_full_idx, write_gray;
   wire    [BITS:0] next_full_idx, next_gray;
 
-  // normal counter 1st: write increments the counter, but only if 
-  // not full. Error on write full handled higher up
-  // We use this to form FIFO index as well (but 1 less bit)
+  // 二进制计数器：写操作时递增
   always @ (posedge WCLK or negedge RSTn)
     if (~RSTn)
       write_full_idx <= {BITS+1{1'b0}};
     else if (write_one & ~write_full)
       write_full_idx <= next_full_idx;
   assign next_full_idx = write_full_idx + {{BITS{1'b0}}, 1'b1};
-  assign write_idx     = write_full_idx[BITS-1:0]; // index into FIFO
-    // note below: write only cares about full, not empty. We use
-    // combinatorial full because short paths for use
-    // logic below tests for inner ==, but then MSB and next-MSB !=
-    // to match gray wrap
+  assign write_idx     = write_full_idx[BITS-1:0]; // FIFO索引（少1位）
+
+  // 满状态判断：组合逻辑比较格雷码
+  // 比较规则：写格雷码等于{~读格雷码最高两位, 读格雷码低位}
   assign write_full    = write_gray == {~wclk_rgray[BITS -: 2],
                                        wclk_rgray[BITS-2:0]};
 
-  // gray code counter for export over clock domain
-  // write increments the gray code for sharing 
+  // 格雷码计数器：用于跨时钟域同步
   always @ (posedge WCLK or negedge RSTn)
     if (~RSTn)
       write_gray <= {BITS+1{1'b0}};
     else if (write_one & ~write_full)
       write_gray <= next_gray;
-  assign next_gray     = next_full_idx[BITS:1] ^ next_full_idx;
-  assign export_wgray  = write_gray;
+  assign next_gray     = next_full_idx[BITS:1] ^ next_full_idx; // 二进制转格雷码
+  assign export_wgray  = write_gray;                           // 输出格雷码
 
 endmodule
 
 
-// FIFO for read side. Based on Sunburst design FIFO
-// -- Note that we do not register empty since short paths
-module i3c_internal_fifo_read #(parameter BITS=3) // bit size, so 2^BITS
+// ============================================================================
+// 模块：i3c_internal_fifo_read
+// 功能：FIFO读侧控制模块（基于Sunburst设计）
+// 描述：管理FIFO的读指针、空状态判断和格雷码生成
+//       注意：空状态使用组合逻辑实现以缩短路径延迟
+// ============================================================================
+module i3c_internal_fifo_read #(parameter BITS=3) // 位宽参数（深度2^BITS）
   (
-  input               RSTn,             // global reset
-  input               RCLK,             // clock of read side (CLK or SCL)
-  input               read_one,         // want new value
-  input      [BITS:0] rclk_wgray,       // write gray count sync to our domain
-  output              read_empty,       // is empty (else can read)
-  output     [BITS:0] export_rgray,     // our exported gray count
-  output   [BITS-1:0] read_idx,         // index into FIFO
-  // next is only used for holding buffer if enabled
+  input               RSTn,             // 全局复位
+  input               RCLK,             // 读时钟（CLK或SCL）
+  input               read_one,         // 读请求（非空时可读取）
+  input      [BITS:0] rclk_wgray,       // 同步到本域的写侧格雷码指针
+  output              read_empty,       // FIFO空标志
+  output     [BITS:0] export_rgray,     // 输出到其他时钟域的格雷码指针
+  output   [BITS-1:0] read_idx,         // 读索引（FIFO地址）
+  // 用于保持缓冲的下一个读索引（可选）
   output   [BITS-1:0] next_read_idx
   );
  
-  // notes:
-  // 1. Read side only cares about empty or not empty since we
-  //    can read if not empty, else we cannot
-  // 2. Can only get empty by us reading (popping)
-  //    -- So detected as it happens in this (rclk) domain
-  //    -- Which is safe since cannot over read regardless of 
-  //       ratio of clocks.
-  // 3. Change to Not-empty synchronized from write side, so delayed
-  //    -- Which only means it takes longer before we can read
-  //       a new value, but no risk
-  // Model of use is counters are 1 bit larger than needed to index
-  // FIFO. This allows us to separate ridx==widx is empty vs. full.
-  // The extra bit means empty is r==w and full differs by MSB
+  // 设计说明：
+  // 1. 读侧只关心空状态，非空时可读取
+  // 2. 空状态只能由本侧读取操作产生，在本时钟域检测是安全的
+  // 3. 非空状态从写侧同步而来，可能有延迟，但只影响读取时机，无风险
+  // 计数器比FIFO索引多1位，用于区分空满状态
   reg     [BITS:0] read_full_idx, read_gray;
   wire    [BITS:0] next_full_idx, next_gray;
 
-  // normal counter 1st: read increments the counter, but only if 
-  // not empty. Error on read empty handled higher up
-  // We use this to form FIFO index as well (but 1 less bit)
+  // 二进制计数器：读操作时递增
   always @ (posedge RCLK or negedge RSTn)
     if (~RSTn)
       read_full_idx <= {BITS+1{1'b0}};
     else if (read_one & ~read_empty)
       read_full_idx <= next_full_idx;
   assign next_full_idx = read_full_idx + {{BITS{1'b0}}, 1'b1};
-  assign read_idx      = read_full_idx[BITS-1:0]; // index into FIFO
-    // note below: read only cares about empty, not full. We use
-    // combinatorial empty because short paths for use
-  assign read_empty    = read_gray == rclk_wgray; // empty is matching
+  assign read_idx      = read_full_idx[BITS-1:0]; // FIFO索引（少1位）
 
-  // gray code counter for export over clock domain
-  // read increments the gray code for sharing 
+  // 空状态判断：组合逻辑比较格雷码是否相等
+  assign read_empty    = read_gray == rclk_wgray;
+
+  // 格雷码计数器：用于跨时钟域同步
   always @ (posedge RCLK or negedge RSTn)
     if (~RSTn)
       read_gray <= {BITS+1{1'b0}};
     else if (read_one & ~read_empty)
       read_gray <= next_gray;
-  assign next_gray     = next_full_idx[BITS:1] ^ next_full_idx;
-  assign export_rgray  = read_gray;
+  assign next_gray     = next_full_idx[BITS:1] ^ next_full_idx; // 二进制转格雷码
+  assign export_rgray  = read_gray;                           // 输出格雷码
 
-  // special for holding
-  assign next_read_idx   = next_full_idx[BITS-1:0]; // index into FIFO
+  // 下一个读索引（用于保持缓冲提前获取）
+  assign next_read_idx   = next_full_idx[BITS-1:0];
+
 endmodule
-
-

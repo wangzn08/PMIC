@@ -1,9 +1,8 @@
-// This is a STUB only
-// NOTE: you must replace this with clock-safe (glitch free) cells
-//       for muxing and inversion (or XOR).
-//       The PD tools can use constraints to treat the output as
-//       clock for clock distribution and STA.
-
+// CLOCK_SOURCE.v
+// 模块: CLOCK_SOURCE_MUX 和 CLOCK_SOURCE_INV
+// 功能: 时钟源多路选择器和反相器
+//       注意：必须用时钟安全（无毛刺）单元替换此模块，用于多路复用和反相（或异或）。
+//       PD 工具可以使用约束将输出视为时钟分布和 STA 的时钟。
 
 module CLOCK_SOURCE_MUX(
   input    use_scan_clock,

@@ -1,198 +1,108 @@
-/*--------------------------------------------------------------------
-  Copyright (C) 2015-2019, NXP B.V.
-  All rights reserved.
-  
-  Redistribution and use in source and binary forms, with or without 
-  modification, are permitted provided that the following conditions 
-  are met:
-  
-  1. Redistributions of source code must retain the above copyright 
-     notice, this list of conditions and the following disclaimer.
-  
-  2. Redistributions in binary form must reproduce the above copyright 
-     notice, this list of conditions and the following disclaimer in
-     the documentation and/or other materials provided with the 
-     distribution.
-  
-  3. Neither the name of the copyright holder nor the names of its 
-     contributors may be used to endorse or promote products derived 
-     from this HDL software without specific prior written permission.
-  
-  THIS (HDL) SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
-  CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
-  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
-  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
-  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
-  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT 
-  NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
-  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
-  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
-  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
-  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, 
-  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// 设计信息
+// 文件名称        : i3c_data_tobus.v
+// 描述            : MIPI I3C 主设备读取出站数据缓冲/FIFO 模块（从设备->主设备）
+//                    此模块支持数据缓冲模型以及 SCL 时钟域与系统（如 PCLK）时钟域之间的映射。
+//                    支持类似 FIFO 的映射，包括乒乓缓冲区（2 入口 FIFO）的基础。
+//                    使用内部更深 FIFO 是可选的。外部 FIFO 支持隐含在浅乒乓版本中。
+//                    此模块还处理总线传输期间的错误同步。
 
-  NOTE: No license under any third-party patent is granted or implied. 
-        It is the responsibility of the licensee to obtain any required 
-        third-party patent licenses.
-
-  Note on terms used above:
-  1. Software and HDL software are used interchangeably.
-  2. Binary includes FPGA, simulation, and physical forms such 
-     as Silicon chips.
-  3. Clause 2 allows for such notice on a Web page or other 
-     electronic form not part of a distribution.
-  The original BSD source is available from:
-    https://github.com/NXP/i3c-slave-design
-  -------------------------------------------------------------------- */
-
-//
-//  ----------------------------------------------------------------------------
-//                    Design Information
-//  ----------------------------------------------------------------------------
-//  File            : i3c_data_tobus.v
-//  Organisation    : MCO
-//  Tag             : 1.1.11
-//  Date            : $Date: Thu Nov 14 12:28:26 2019 $
-//  Revision        : $Revision: 1.62 $
-//
-//  IP Name         : i3c_data_tobus 
-//  Description     : MIPI I3C Master-Read outbound Data buffered/fifoed S->M)
-//    This contains support for the data buffering model and the mapping
-//    between the SCL clock domain and the system (e.g. PCLK) domain.
-//    This supports FIFO like mapping, including the base of a ping
-//    pong buffer (2 entry FIFO). 
-//    Use of internal deeper FIFO is optional. External FIFO support
-//    is implicit from the shallow ping pong version
-//    This also handles sync of errors during to-bus.
-//
-//  ----------------------------------------------------------------------------
-//                    Revision History
-//  ----------------------------------------------------------------------------
-//
-//
-//  ----------------------------------------------------------------------------
-//                    Implementation details
-//  ----------------------------------------------------------------------------
-//  See the micro-arch spec and MIPI I3C spec
-//
-//    This suppports the Clock Domain Crossing aspect for data for 
-//    To-bus (from us to Master) including errors (e.g. underrun)
-//  ----------------------------------------------------------------------------
-
-`include "i3c_params.v"                 // local parameters/constants
+`include "i3c_params.v"                 // 局部参数/常量
 
 module i3c_data_tobus #(
-    parameter FIFO_TYPE       = 0,      // [1:0]==b01 if internal FIFO
-    parameter EXT_FIFO        = 0,      // only if external fifo type
-    parameter ENA_TOBUS_FIFO  = 0       // depth of to-bus as power of 2 from 2 up
+    parameter FIFO_TYPE       = 0,      // [1:0]==b01 表示内部 FIFO
+    parameter EXT_FIFO        = 0,      // 仅用于外部 FIFO 类型
+    parameter ENA_TOBUS_FIFO  = 0       // 到总线的深度，2 的幂，从 2 开始
   )
   (
-  // define clocks and reset
-  input               RSTn,             // global reset
-  input               CLK,              // system clock (bus or other)
-  input               SCL,              // passed up from SDR - not SCL_n
-  input               SCL_n,            // passed up from SDR - SCL_n
-  // now nets in CLK domain to memory mapped registers or nets
-  input               avail_tb_ready,   // to-bus byte is ready
-  input         [7:0] avail_tb_data,    // byte
-  output              avail_tb_ack,     // we have used byte
-  input               avail_tb_end,     // last one - with ready
-  input               tb_flush,         // 1 cycle pulse to flush buff
-  output              avail_tb_full,    // is 1 if full (FIFO trig or not)
-  // next is FIFO count even if no FIFO
-  output        [4:0] avail_byte_cnt,   // count in bytes in FIFO
-  input         [1:0] tx_trig,          // FIFO trigger level if FIFO used
-  output              int_tb,           // set when TX not full or <=trig
-  // next ones are set and clear for sync of errors
-  output              set_tb_urun_nack, // under run on header (so NACKed)
-  output              set_tb_urun,      // under run on data
-  output              set_tb_term,      // master rerminated read
+  // 定义时钟和复位
+  input               RSTn,             // 全局复位
+  input               CLK,              // 系统时钟（总线或其他）
+  input               SCL,              // 从 SDR 传递上来 - 不是 SCL_n
+  input               SCL_n,            // 从 SDR 传递上来 - SCL_n
+  // 现在 CLK 域中的网络连接到内存映射寄存器或网络
+  input               avail_tb_ready,   // 到总线的字节已准备就绪
+  input         [7:0] avail_tb_data,    // 字节数据
+  output              avail_tb_ack,     // 我们已使用字节
+  input               avail_tb_end,     // 最后一个字节 - 与 ready 同时
+  input               tb_flush,         // 1 周期脉冲以刷新缓冲区
+  output              avail_tb_full,    // 如果满则为 1（FIFO 触发与否）
+  // 下一个是 FIFO 计数，即使没有 FIFO
+  output        [4:0] avail_byte_cnt,   // FIFO 中的字节计数
+  input         [1:0] tx_trig,          // 如果使用 FIFO，则为 FIFO 触发水平
+  output              int_tb,           // 当 TX 未满或 <=trig 时设置
+  // 下一个是错误同步的设置和清除
+  output              set_tb_urun_nack, // 头部欠载（因此返回 NACK）
+  output              set_tb_urun,      // 数据欠载
+  output              set_tb_term,      // 主设备终止读取
   input               clear_tb_urun_nack,
   input               clear_tb_urun,
   input               clear_tb_term,
-  // now nets in SCL_n domain
-  output              tb_data_valid,    // b1 if full, b0 if empty
-  output        [7:0] tb_datab,         // data for them to use if valid
-  output              tb_end,           // held until data consumed
-  input               tb_datab_ack,     // ack for 1 SCL_n clock when consumed
-  input               tb_urun_nack,     // pulse for 1 SCL_n if NACKed due to no data
-  input               tb_urun,          // pulse for 1 SCL_n under run and not end
-  input               tb_term,          // pulse for 1 SCL_n when Master terminates read
-  input               scan_no_rst       // prevents layered reset
+  // 现在 SCL_n 域中的网络
+  output              tb_data_valid,    // b1 表示满，b0 表示空
+  output        [7:0] tb_datab,         // 如果有效，供它们使用的数据
+  output              tb_end,           // 保持直到数据被消耗
+  input               tb_datab_ack,     // 消耗时的确认，持续 1 个 SCL_n 时钟
+  input               tb_urun_nack,     // 如果因无数据而 NACK，则脉冲 1 个 SCL_n
+  input               tb_urun,          // 欠载且非结束时的脉冲，持续 1 个 SCL_n
+  input               tb_term,          // 当主设备终止读取时的脉冲，持续 1 个 SCL_n
+  input               scan_no_rst       // 防止分层复位
   );
 
-  // Table of Contents
-  // 1. Overview of the buffer/FIFO model
-  // 2. registers and wires for support
-  // 3. Buffer/FIFO write control in CLK domain
-  // 4. Buffer/FIFO read in SCL domain (not SCL_n)
-  // 5. Sync handshakes from SCL domain for errors
+  // 内容目录
+  // 1. 缓冲区/FIFO 模型概述
+  // 2. 支持用的寄存器和连线
+  // 3. CLK 域中的缓冲区/FIFO 写入控制
+  // 4. SCL 域中的缓冲区/FIFO 读取（非 SCL_n）
+  // 5. 来自 SCL 域的错误同步握手
 
  //
- // 2-entry default ping-pong scheme
+ // 2 入口默认乒乓方案
  //
  generate if (FIFO_TYPE[`FIFO_INT_b]==0 || ENA_TOBUS_FIFO==0) begin : tb_pingpong
 
   //
-  // This block provides a 2 entry FIFO (ping pong buffer) for
-  // the SCL domain, with data to go to the Master.
-  // The 2 entry FIFO allows for a very simple CDC boundary
-  // since it is reduced from the normal binary vs. gray code
-  // issues. Further, since SCL can stop suddenly, all of the
-  // work is done on the system side.
-  // The model for writer (this block) and reader (the SCL
-  // side) is as follows:
-  // 1. System tb_widx (write index) is 2 bits, so one 
-  //    more bit than is needed to index entries [0] & [1] 
-  //    of the FIFO.
-  // 2. The SCL scl_ridx is synchronized over to tb_ridx
-  //    as a straight copy (since a gray code)
-  // 3. The tb_widx (and by extension tb_ridx) increment
-  //    using gray code: 00,01,11,10
-  //    The index into the FIFO then is gray[1]^gray[0], 
-  //    which gives 0,1,0,1 as expected.
-  // 4. Empty is tb_widx==tb_ridx, where tb_ridx is the
-  //    synchronized version of the scl_ridx.
-  //    Likewise empty is scl_widx==scl_ridx, where 
-  //    scl_widx is the synchronized version of tb_widx
-  // 5. The system side can push when empty or when only
-  //    one away, otherwise known as not full. This is 
-  //    determined by:
-  //      tb_widx==tb_ridx and ^(tb_widx^tb_ridx)==1
-  //    Note that widx cannot be 3 away, only 2 away is
-  //    full.
-  // 6. The SCL side can pull when not empty. The only way
-  //    to get to empty is by the SCL side reading, so
-  //    simple. The SCL side synchronizes tb_widx on SCL
-  //    vs. SCL_n, so safe.
-  reg           [1:0] tb_widx;          // reg: sys write ptr 
-  wire          [1:0] tb_ridx;          // sync/reg: SCL read ptr
-  wire          [1:0] scl_widx;         // sync/reg: sys write ptr in SCL domain
-  reg           [1:0] scl_ridx;         // reg: SCL read index
-  wire                tb_not_full;      // set when not full, so can push
-  wire                tb_empty;         // set when empty
-  wire                tb_wptr;          // point into FIFO from tb_widx
-  wire                scl_rptr;         // point into FIFO from scl_ridx
-  wire                scl_empty;        // empty detect in SCL side
-  reg                 ack_push;         // 1 cycle pulse. Safest this way
-  reg           [1:0] next_widx, next_ridx; // case to expand gray code
-    // now fifo buffers - used to pull from ext FIFO or reg 
-  reg           [8:0] tbfifo[0:1];     // extra bit for end mark
+  // 此块为 SCL 域提供一个 2 入口 FIFO（乒乓缓冲区），用于发送给主设备的数据。
+  // 2 入口 FIFO 允许非常简单的 CDC 边界，因为它减少了正常的二进制与格雷码问题。
+  // 此外，由于 SCL 可能突然停止，所有工作都在系统侧完成。
+  // 写入器（此块）和读取器（SCL 侧）的模型如下：
+  // 1. 系统 tb_widx（写入索引）是 2 位，比索引 FIFO 条目 [0] 和 [1] 所需的位数多一位。
+  // 2. SCL scl_ridx 同步到 tb_ridx，作为直接复制（因为是格雷码）。
+  // 3. tb_widx（以及 tb_ridx）使用格雷码递增：00,01,11,10
+  //    那么 FIFO 中的索引是 gray[1]^gray[0]，按预期给出 0,1,0,1。
+  // 4. 空条件是 tb_widx==tb_ridx，其中 tb_ridx 是 scl_ridx 的同步版本。
+  //    同样，空条件是 scl_widx==scl_ridx，其中 scl_widx 是 tb_widx 的同步版本。
+  // 5. 系统侧可以在为空或仅差一个（即未满）时推送。这由以下决定：
+  //      tb_widx==tb_ridx 且 ^(tb_widx^tb_ridx)==1
+  //    注意：widx 不能差 3 个，差 2 个即为满。
+  // 6. SCL 侧可以在非空时拉取。变为空的唯一方式是 SCL 侧读取，因此很简单。
+  //    SCL 侧在 SCL 与 SCL_n 上同步 tb_widx，因此安全。
+  reg           [1:0] tb_widx;          // 寄存器：系统写入指针
+  wire          [1:0] tb_ridx;          // 同步/寄存器：SCL 读取指针
+  wire          [1:0] scl_widx;         // 同步/寄存器：系统写入指针在 SCL 域中
+  reg           [1:0] scl_ridx;         // 寄存器：SCL 读取索引
+  wire                tb_not_full;      // 未满时设置，因此可以推送
+  wire                tb_empty;         // 空时设置
+  wire                tb_wptr;          // 从 tb_widx 指向 FIFO 的指针
+  wire                scl_rptr;         // 从 scl_ridx 指向 FIFO 的指针
+  wire                scl_empty;        // SCL 侧的空检测
+  reg                 ack_push;         // 1 周期脉冲。这种方式最安全
+  reg           [1:0] next_widx, next_ridx; // 扩展格雷码的情况
+    // 现在 FIFO 缓冲区 - 用于从外部 FIFO 或寄存器拉取
+  reg           [8:0] tbfifo[0:1];     // 额外位用于结束标记
 
-  // sync their read index and our write index. 
-  // gray codes, so independent
+  // 同步它们的读取索引和我们的写入索引。
+  // 格雷码，因此独立
   SYNC_S2C #(.WIDTH(2)) sync_scl_ridx(.rst_n(RSTn), .clk(CLK), .scl_data(scl_ridx), 
                               .out_clk(tb_ridx));
   SYNC_C2S #(.WIDTH(2)) sync_tb_widx(.rst_n(RSTn), .scl(SCL), .clk_data(tb_widx), 
                              .out_scl(scl_widx));
 
   //
-  // system CLK domain
+  // 系统 CLK 域
   //
   assign tb_empty    = tb_widx==tb_ridx;
   assign tb_not_full = tb_empty | ^(tb_widx ^ tb_ridx);
-  assign tb_wptr     = ^tb_widx;        // gives 0,1,0,1
+  assign tb_wptr     = ^tb_widx;        // 给出 0,1,0,1
 
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn) begin
@@ -200,12 +110,11 @@ module i3c_data_tobus #(
       ack_push         <= 1'b0;
       tbfifo[0]        <= 9'd0;
       tbfifo[1]        <= 9'd0;
-    end else if (tb_flush) // note that flush overrides push
+    end else if (tb_flush) // 注意：flush 覆盖 push
       tb_widx          <= tb_ridx; 
     else if (avail_tb_ready & tb_not_full) begin
-      // can safely push next value. Note that they sync 
-      // tb_widx, so no risk on bits changing (they see 
-      // widx  after it is holding stable)
+      // 可以安全推送下一个值。注意它们同步 tb_widx，
+      // 因此位变化无风险（它们在保持稳定后看到 widx）
       tbfifo[tb_wptr]  <= {avail_tb_end, avail_tb_data};
       tb_widx          <= next_widx;
       ack_push         <= 1'b1;
@@ -213,55 +122,55 @@ module i3c_data_tobus #(
       ack_push         <= 1'b0;
 
   assign avail_tb_ack   = (EXT_FIFO==`EXT_FIFO_REQ) ?
-                          (avail_tb_ready & tb_not_full) : // combo
-                          ack_push;     // registered
-  assign int_tb         = |tx_trig ? tb_not_full : tb_empty; // trig_level 0 special
+                          (avail_tb_ready & tb_not_full) : // 组合逻辑
+                          ack_push;     // 寄存器输出
+  assign int_tb         = |tx_trig ? tb_not_full : tb_empty; // 触发水平 0 特殊
   assign avail_tb_full  = ~tb_not_full;
   assign avail_byte_cnt = tb_empty ? 5'd0 : tb_not_full ? 5'd1 : 5'd2;
 
-  // gray code
+  // 格雷码
   always @ ( * ) 
     case(tb_widx)
     2'b00: next_widx = 2'b01;
     2'b01: next_widx = 2'b11;
     2'b11: next_widx = 2'b10;
     2'b10: next_widx = 2'b00;
-    // no default since complete
+    // 无默认，因为完整
     endcase
 
   //
-  // SCL clock domain (not SCL_n) for CDC
+  // SCL 时钟域（非 SCL_n）用于 CDC
   //
 
-  // read pointer
+  // 读取指针
   always @ (posedge SCL or negedge RSTn)
     if (~RSTn) 
       scl_ridx <= 2'b00;
     else if (tb_datab_ack & ~scl_empty)
       scl_ridx <= next_ridx;
 
-  assign scl_rptr      = ^scl_ridx;     // gives 0,1,0,1
+  assign scl_rptr      = ^scl_ridx;     // 给出 0,1,0,1
   assign scl_empty     = scl_widx==scl_ridx;
   assign tb_data_valid = ~scl_empty; 
   assign tb_end        = tbfifo[scl_rptr][8];
-    // note below will have uncertain values when not selected and not used yet
+    // 注意：当未选择且尚未使用时，以下值不确定
   assign tb_datab      = tbfifo[scl_rptr][7:0];
 
-  // gray code
+  // 格雷码
   always @ ( * ) 
     case(scl_ridx)
     2'b00: next_ridx = 2'b01;
     2'b01: next_ridx = 2'b11;
     2'b11: next_ridx = 2'b10;
     2'b10: next_ridx = 2'b00;
-    // no default since complete
+    // 无默认，因为完整
     endcase
 
  //
- // internal FIFO
+ // 内部 FIFO
  //
  end else begin : tb_fifo_inst
-  // instantiate FIFO, with correct size and optional holding
+  // 实例化 FIFO，具有正确的大小和可选的保持缓冲区
   i3c_internal_tb_fifo #(.BITS(ENA_TOBUS_FIFO), 
                          .USE_HOLDING(FIFO_TYPE[`FIFO_TBHOLD_b]))
     tb_fifo(.RSTn(RSTn), .CLK(CLK), .SCL(SCL), .SCL_n(SCL_n), 
@@ -275,10 +184,10 @@ module i3c_data_tobus #(
  end endgenerate
 
   //
-  // Sync errors using SCL
+  // 使用 SCL 同步错误
   //
 
-  // underun errors on to-bus (header and read byte)
+  // 到总线的欠载错误（头部和读取字节）
   SYNC_2PH_S2C_STATE synch_tb_urun_nack(.rst_n(RSTn), .scl(SCL), .clk(CLK), 
                                         .trig_scl(tb_urun_nack), 
                                         .out_clk(set_tb_urun_nack), .clear_clk(clear_tb_urun_nack));
@@ -286,10 +195,9 @@ module i3c_data_tobus #(
                                         .trig_scl(tb_urun), 
                                         .out_clk(set_tb_urun), .clear_clk(clear_tb_urun));
 
-  // terminate is from the master killing a read before we are done
+  // 终止是主设备在我们完成之前终止读取
   SYNC_2PH_S2C_STATE synch_tb_term     (.rst_n(RSTn), .scl(SCL), .clk(CLK), 
                                         .trig_scl(tb_term), 
                                         .out_clk(set_tb_term), .clear_clk(clear_tb_term));
-
 
 endmodule

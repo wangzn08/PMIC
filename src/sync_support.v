@@ -1,357 +1,339 @@
 /*--------------------------------------------------------------------
-  版权声明（略）
+  版权所有 (C) 2015-2019, NXP B.V.
+  保留所有权利。
+  
+  在满足以下条件的情况下，允许以源代码和二进制形式重新分发和使用（无论是否经过修改）：
+  
+  1. 源代码的重新分发必须保留上述版权声明、此条件列表以及以下免责声明。
+  
+  2. 二进制形式的重新分发必须在随分发提供的文档和/或其他材料中保留上述版权声明、
+     此条件列表以及以下免责声明。
+  
+  3. 未经事先明确的书面许可，不得使用版权持有者或贡献者的姓名来背书或推广
+     衍生自此 HDL 软件的产品。
+  
+  本（HDL）软件由版权持有者和贡献者“按原样”提供，不承诺任何明示或暗示的保证，
+  包括但不限于针对特定用途的适销性和适用性的暗示保证。在任何情况下，版权持有者
+  或贡献者均不对任何直接、间接、附带、特别、惩戒性或后果性损害（包括但不限于
+  替代商品或服务的采购；使用、数据或利润损失；或业务中断）承担责任，无论其
+  起因及基于何种责任理论（无论是合同、严格责任还是侵权行为，包括疏忽或其他原因），
+  即使已被告知存在此类损害的可能性。
+
+  注：未授予或暗示任何第三方专利许可。受让方有责任获得任何所需的第三方专利许可。
+
+  关于上述术语的说明：
+  1. 软件（Software）和 HDL 软件可以互换使用。
+  2. 二进制（Binary）形式包括 FPGA、仿真以及芯片物理形式（如硅片）。
+  3. 第 2 条允许在网页或其他不属于分发部分的电子形式中显示此类声明。
+  原始 BSD 源码获取地址：
+    https://github.com/NXP/i3c-slave-design
   -------------------------------------------------------------------- */
 
 //
 //  ----------------------------------------------------------------------------
-//                    设计信息
+//                     设计信息
 //  ----------------------------------------------------------------------------
-//  文件名          : sync_support.v
-//  所属组织        : MCO
-//  版本标签        : 1.1.11
-//  日期            : $Date: Wed Jun 12 23:47:03 2019 $
-//  修订号          : $Revision: 1.61 $
+//  文件      : sync_support.v
+//  组织      : MCO
+//  标签      : 1.1.11
+//  日期      : $Date: Wed Jun 12 23:47:03 2019 $
+//  版本      : $Revision: 1.61 $
 //
-//  IP 名称         : SYNC_ 通用同步模块
-//  功能描述        : 为 I3C 从设备提供跨时钟域（CDC）同步支持
-//    本文件包含多种跨时钟域同步机制，包括两相握手（2-phase handshake）、
-//    脉冲/电平同步、FIFO 同步等，用于 SCL（I3C 时钟）与系统主时钟（CLK）之间的信号传递。
-//    由于 SCL 可能突然停止（非自由运行时钟），因此采用两相握手机制确保可靠性。
+//  IP 名称   : 通用 SYNC_ 模块库
+//  描述      : 从机（Slave）跨时钟域支持
+//    此文件包含跨时钟域（CDC）同步支持，类型包括 2 相及其他方案，
+//    涵盖脉冲和电平信号。用于 SCL 到（系统）CLK 以及 CLK 到 SCL。
+//    适用于单根信号线、握手、FIFO 等。
+//    注意：由于 SCL 时钟可能突然停止，因此使用了 2 相握手机制。
 //
 //  ----------------------------------------------------------------------------
-//                    实现细节
+//                     修订历史
 //  ----------------------------------------------------------------------------
-//  - 使用命名块便于 CDC 检查工具（如 Spyglass）识别同步逻辑。
-//  - 在现代工艺下，单级触发器通常足够；但在较老工艺中可能需使用专用同步触发器。
-//  - I3C SCL 最低速率为约 25 MHz（周期 40ns），留有足够时间让亚稳态收敛。
 //
-//  命名约定说明：
-//    SYNC_   = 同步模块
-//    2PH_    = 两相握手（Two-Phase Handshake）
-//    S2C_    = SCL 到 CLK 域（SCL-to-CLK）
-//    C2S_    = CLK 到 SCL 域（CLK-to-SCL）
-//    STATE   = 状态型输出（需显式清除）
-//    LVL_    = 电平输入（Level）
-//    LVLH_   = 高电平边沿检测（Level High Edge）
-//    ASet    = 异步置位，本地清零
-//    AClr    = 本地置位，异步清零
-//    Seq2    = 两级序列器，确保本地产生单周期脉冲
+//
+//  ----------------------------------------------------------------------------
+//                     实现细节
+//  ----------------------------------------------------------------------------
+//  参见微架构规范和 MIPI I3C 规范。
+//
+//    此模块支持使用命名块进行跨时钟域处理，以便 Spyglass（或同类工具）识别同步位置。
+//    对于大多数现代工艺，单级触发器模型（single flop model）已足够，
+//    尽管对于旧工艺，可能需要通过约束更改触发器类型（例如同步触发器，其具有
+//    更快的“重力”稳定速度）。
+//    在正常情况下，1 级触发器是可行的，因为在较低速路径下，Q 输出的亚稳态噪声
+//    在时间上足够短。也就是说，至少有 ~40ns 的时间用于信号稳定并到达另一端。
 //  ----------------------------------------------------------------------------
 
-// ============================================================================
-// 模块：SYNC_2PH_S2C_STATE
-// 功能：将 SCL 域的**脉冲触发信号**通过两相握手同步到 CLK 域，并保持为状态信号，
-//       直到被 CLK 域显式清除。
-// 应用场景：例如 SCL 域检测到 START 条件，需通知 CLK 域进入新状态。
-// ============================================================================
+// 命名约定：SYNC_=同步, 2PH_=2相, S2P_=SCL到CLK, STATE=带清除输入的内部状态
+//           LVL_=电平输入（相对于脉冲）, LVLH_=高电平有效
+// 其他命名：ASet=异步置位，本地清除; AClr=本地置位，异步清除
+//           Seq2=2级触发器序列器，确保在本地域获得1个脉冲宽度
 module SYNC_2PH_S2C_STATE( 
-  input             rst_n,      // 异步复位（低有效）
-  input             scl,        // SCL 时钟（用于采样 trig_scl）
-  input             clk,        // 系统主时钟
-  input             trig_scl,   // SCL 域输入的单周期脉冲触发信号
-  output            out_clk,    // CLK 域输出的状态信号（高表示事件发生）
-  input             clear_clk   // CLK 域输入的清除信号（高有效）
-);
+  input             rst_n,
+  input             scl,
+  input             clk,
+  input             trig_scl,   // 来自 SCL 时钟域的触发输入
+  output            out_clk,    // CLK 时钟域的输出状态
+  input             clear_clk   // 来自 CLK 时钟域的输入清除信号
+  );
 
-  reg scl_hshake;   // SCL 域握手信号：trig_scl 触发时翻转
-  reg clk_state;    // CLK 域状态：当握手信号与 ACK 不同时置 1
-  reg clk_ack;      // CLK 域对握手的确认信号
+  reg               scl_hshake;
+  reg               clk_state;
+  reg               clk_ack;
 
-  // SCL 域：根据 trig_scl 脉冲翻转握手信号
+  // 注意：这部分逻辑可能有点难懂。scl_ 到 clk_ 的同步是 2 相的。
+  // scl_hshake 根据触发信号翻转状态。
+  // clk_state 在 (hshake ^ ack == 1) 时置位，用于 CLK 域。
+  // clk_ack 仅在 clk_state 改变后才改变，这样我们既不会错过信号，
+  // 也不会将亚稳态逻辑（hshake ^ ack）暴露到外部。
+  // 我们使用 2 相是因为 SCL 不是持续运行的时钟，可能会停止。
+  // 因此，由 CLK 完成所有的采样工作。
+  // 请注意，基于状态（state-based）的同步器只能通过显式请求清除；
+  // 因此在清除之前可能会发生多次状态改变，这是允许的。
+
   always @ (posedge scl or negedge rst_n)
     if (!rst_n)
       scl_hshake <= 1'b0;
-    else if (trig_scl)                  // trig_scl 为单周期脉冲
-      scl_hshake <= ~scl_hshake;        // 翻转状态，形成两相编码
+    else if (trig_scl)                  // 触发脉冲（SCL 域的 1 个周期）
+      scl_hshake <= ~scl_hshake;        // 翻转状态
 
-  // CLK 域：检测握手变化，置位状态
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_state <= 1'b0;
-    else if (scl_hshake ^ clk_ack)      // 握手信号与 ACK 不同 → 有新事件
-      clk_state <= 1'b1;                // 置位状态
-    else if (clear_clk)                 // 显式清除
-      clk_state <= 1'b0;
-
+      clk_state  <= 1'b0;
+    else if (scl_hshake ^ clk_ack)      // CDC
+      clk_state  <= 1'b1;               // 存在差异时置位
+    else if (clear_clk)
+      clk_state  <= 1'b0;               // 显式清除时清零
   assign out_clk = clk_state;
 
-  // CLK 域：仅在状态已置位且仍存在差异时更新 ACK，避免亚稳态外泄
+  // ACK 仅在状态改变后且仍存在差异时改变
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_ack <= 1'b0;
-    else if (clk_state & (scl_hshake ^ clk_ack))
-      clk_ack <= ~clk_ack;              // 翻转 ACK，完成一次握手
+      clk_ack    <= 1'b0;
+    else if (clk_state & (scl_hshake^clk_ack)) // 随状态改变 - CDC
+      clk_ack    <= ~clk_ack; 
 
 endmodule 
 
-// ============================================================================
-// 模块：SYNC_2PH_LVL_S2C_STATE
-// 功能：将 SCL 域的**持续电平信号**同步到 CLK 域，作为状态信号，
-//       直到被 CLK 域显式清除。
-// 与上一模块区别：输入是电平而非脉冲，因此无需 SCL 域的翻转寄存器。
-// 注意：若电平持续时间短于 CLK 周期，可能无法被捕获。
-// ============================================================================
 module SYNC_2PH_LVL_S2C_STATE(
   input             rst_n,
-  input             scl,        // 保留但未使用（仅为接口一致性）
+  input             scl,
   input             clk,
-  input             trig_scl,   // SCL 域的电平信号（高表示有效）
-  output            out_clk,
-  input             clear_clk
-);
+  input             trig_scl,   // 来自 SCL 域的触发电平信号
+  output            out_clk,    // CLK 域的输出状态
+  input             clear_clk   // 来自 CLK 域的清除输入
+  );
 
-  reg clk_state;
-  reg clk_ack;
+  reg               clk_state;
+  reg               clk_ack;
 
-  // CLK 域直接采样 trig_scl（跨时钟域）
+  // 详见 SYNC_2PH_S2C_STATE。唯一的区别是电平保持不需要 scl_hshake，
+  // 因为它本身就是电平（如果电平相对于 CLK 太短，则不会被采样）。
+  // 如果我们需要确保被观察到，则需要独立的位。
+  // 未来改进：研究针对 CLK 停止情况下的处理。
+
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_state <= 1'b0;
-    else if (trig_scl ^ clk_ack)        // 电平变化（相对于 ACK）
-      clk_state <= 1'b1;
+      clk_state   <= 1'b0;
+    else if (trig_scl ^ clk_ack) // 电平改变 - CDC
+      clk_state   <= 1'b1; 
     else if (clear_clk)
-      clk_state <= 1'b0;
+      clk_state   <= 1'b0; 
   assign out_clk = clk_state;
 
-  // 更新 ACK
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_ack <= 1'b0;
-    else if (clk_state & (trig_scl ^ clk_ack))
-      clk_ack <= ~clk_ack;
+      clk_ack     <= 1'b0;
+    else if (clk_state &
+            (trig_scl ^ clk_ack)) // 仍然存在差异 - CDC
+      clk_ack     <= ~clk_ack; 
 
 endmodule
 
-// ============================================================================
-// 模块：SYNC_2PH_LVLH_S2C_STATE
-// 功能：检测 SCL 域**高电平的上升沿**（即从低到高的跳变），
-//       并在 CLK 域生成一个单次状态信号（需显式清除）。
-// 设计难点：因跨时钟域，不能直接用 trig_scl 上升沿检测（可能漏检）。
-// 解决方案：用两级寄存器记录电平历史，通过异或检测边沿。
-// ============================================================================
 module SYNC_2PH_LVLH_S2C_STATE(
   input             rst_n,
-  input             scl,        // 保留
+  input             scl,
   input             clk,
-  input             trig_scl,   // SCL 域电平信号
-  output            out_clk,
-  input             clear_clk
-);
+  input             trig_scl,   // 来自 SCL 域的触发电平信号
+  output            out_clk,    // CLK 域的输出状态
+  input             clear_clk   // 来自 CLK 域的清除输入信号
+  );
 
-  reg clk_state;
-  reg [1:0] clk_ack;  // clk_ack[0]: 当前采样值；clk_ack[1]: 上一周期采样值
+  reg               clk_state;
+  reg          [1:0] clk_ack;
 
-  // 第一级：同步采样 trig_scl
-  // 第二级：延迟一拍，用于边沿检测
+  // 详见 SYNC_2PH_S2C_STATE。
+  // 高电平有效（Level High）处理起来比较复杂。
+  // clk_state 仅在电平变为高电平时才置高（类似于边沿触发）。
+  // 因此，我们需要记住之前的状态以捕捉边沿。但是，因为是跨时钟域，
+  // 我们不能直接与 SCL 电平对比，因为可能会由于采样早晚导致错过边沿。
+  // 所以我们使用一个额外的触发器。
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_ack <= 2'b00;
-    else if (clk_ack[0] ^ trig_scl)     // 电平变化（CDC 安全）
-      clk_ack[0] <= ~clk_ack[0];        // 翻转表示变化
-    else if (^clk_ack)                  // 若两级不同（即刚发生边沿）
-      clk_ack[1] <= ~clk_ack[1];        // 更新历史值
+      clk_ack     <= 2'b00;
+    else if (clk_ack[0] ^ trig_scl)
+      clk_ack[0]  <= ~clk_ack[0];       // CDC
+    else if (^clk_ack)
+      clk_ack[1]  <= ~clk_ack[1];       // 延迟一个周期
 
-  // 边沿检测：(^clk_ack) 表示当前与历史不同，且 ~clk_ack[1] 确保是上升沿首次捕获
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
-      clk_state <= 1'b0;
-    else if (^clk_ack & ~clk_ack[1])    // 检测到上升沿
-      clk_state <= 1'b1;
+      clk_state   <= 1'b0;
+    else if (^clk_ack & ~clk_ack[1])
+      clk_state   <= 1'b1; 
     else if (clear_clk)
-      clk_state <= 1'b0;
+      clk_state   <= 1'b0; 
   assign out_clk = clk_state;
 
 endmodule
 
-// ============================================================================
-// 模块：SYNC_Pulse_S2C
-// 功能：将 CLK 域的**本地置位信号**（local_set）以脉冲形式传递到 SCL 域，
-//       并在 SCL 域生成一个单周期脉冲（o_pulse）。
-// 采用四相握手机制（隐含在 svalue/cvalue 循环中），确保可靠传递。
-// ============================================================================
+// 下一个是异步置位，本地清除
 module SYNC_Pulse_S2C(
   input SCL,
   input CLK,
   input RSTn,
-  input local_set,      // CLK 域置位请求（高有效）
-  output o_pulse        // SCL 域输出的单周期脉冲
-);
+  input local_set,
+  output o_pulse);
 
-  reg svalue, cvalue, cpulse;
-
-  // SCL 域：接收来自 CLK 的置位请求，并等待确认
+  // 4 相握手，但输出脉冲
+  reg  svalue, cvalue, cpulse;
   always @ (posedge SCL or negedge RSTn)
     if (!RSTn)
       svalue <= 1'b0;
     else if (local_set)
-      svalue <= 1'b1;           // 置位
-    else if (cvalue)            // 收到 CLK 域确认（CDC）
-      svalue <= 1'b0;           // 清除
+      svalue <= 1'b1;
+    else if (cvalue) // CDC
+      svalue <= 1'b0;
 
-  // CLK 域：检测 svalue，生成确认并产生内部脉冲标记
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       cvalue <= 1'b0;
-    else if (svalue)            // 检测到 SCL 域请求（CDC）
+    else if (svalue) // CDC
       cvalue <= 1'b1;
     else 
       cvalue <= 1'b0;
-
-  // 记录 cvalue 的前一状态，用于生成单周期脉冲
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       cpulse <= 1'b0;
-    else 
-      cpulse <= cvalue;
-
-  // 脉冲 = 当前高 & 上一周期低
+    else if (cvalue)
+      cpulse <= 1'b1;
+    else
+      cpulse <= 1'b0;
   assign o_pulse = cvalue & ~cpulse;
 
 endmodule
 
-// ============================================================================
-// 模块：SYNC_ASet_Seq2
-// 功能：将**异步置位信号**（async_set）同步到 CLK 域，并生成**单周期脉冲**。
-//       异步信号可能来自其他时钟域或外部引脚。
-//       使用两级序列器（seq）确保只输出一个 CLK 周期的高脉冲。
-// ============================================================================
+
+// 下一个是异步置位和本地清除，带有输出 1 个脉冲的序列器
 module SYNC_ASet_Seq2(
   input CLK,
   input RSTn,
-  input async_set,      // 异步置位（高有效）
-  input local_clear,    // 本地清除（高有效）
-  output o_pulse        // 单周期脉冲输出
-);
+  input async_set,
+  input local_clear, 
+  output o_pulse);
 
-  reg value, seq;
-
-  // 同步 async_set 到 CLK 域（单级同步器，假设 async_set 脉宽足够）
+  reg  value, seq;
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       value <= 1'b0;
-    else if (async_set)
+    else if (async_set) // CDC
       value <= 1'b1;
-    else if (local_clear)
+    else if (local_clear) 
       value <= 1'b0;
-
-  // 序列器：每当 value 变化，seq 翻转
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       seq <= 1'b0;
     else if (seq ^ value)
       seq <= ~seq;
-
-  // 脉冲 = value 为高 且 seq 为低（即刚置位后的第一个周期）
+  // 以下在 1 个时钟周期内输出高脉冲，其余为低电平
   assign o_pulse = value & ~seq;
 
 endmodule
 
-// ============================================================================
-// 模块：SYNC_AClr_Seq2
-// 功能：与 SYNC_ASet_Seq2 对称，但用于**异步清除**场景。
-//       本地置位（local_set），异步清除（async_clear），
-//       同样输出单周期脉冲。
-// ============================================================================
+// 下一个是本地置位和异步清除，带有输出 1 个脉冲的序列器
 module SYNC_AClr_Seq2(
   input CLK,
   input RSTn,
-  input local_set,      // 本地置位
-  input async_clear,    // 异步清除（高有效）
-  output o_pulse
-);
+  input local_set,
+  input async_clear, 
+  output o_pulse);
 
-  reg value, seq;
-
+  reg  value, seq;
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       value <= 1'b0;
     else if (local_set) 
       value <= 1'b1;
-    else if (async_clear)
+    else if (async_clear) // CDC
       value <= 1'b0;
-
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       seq <= 1'b0;
     else if (seq ^ value)
       seq <= ~seq;
-
+  // 以下在 1 个时钟周期内输出高脉冲，其余为低电平
   assign o_pulse = value & ~seq;
 
 endmodule
 
-// ============================================================================
-// 模块：SYNC_S2C
-// 功能：通用多比特信号从 SCL 域同步到 CLK 域（单级同步器）。
-//       适用于数据总线、状态字等。
-//       注意：不保证无毛刺，仅用于对亚稳态不敏感的场景（如 FIFO 指针需 Gray 编码）。
-// ============================================================================
+// 下一个是直接从一个域到另一个域的同步
+// 用于本地使用 - 1 级触发器
 module SYNC_S2C #(parameter WIDTH=1) ( 
   input             rst_n,
   input             clk,
-  input  [WIDTH-1:0] scl_data,   // SCL 域输入数据
-  output [WIDTH-1:0] out_clk     // CLK 域输出
-);
+  input  [WIDTH-1:0]scl_data,
+  output [WIDTH-1:0]out_clk     // CLK 域内的输出副本
+  );
 
-  reg [WIDTH-1:0] clk_copy;
+  reg  [WIDTH-1:0]  clk_copy;
 
   assign out_clk = clk_copy;
 
+  // 注意：可以使用 clk_copy ^ scl_data 作为测试以允许使用 ICG
   always @ (posedge clk or negedge rst_n)
     if (!rst_n)
       clk_copy <= {WIDTH{1'b0}};
     else 
-      clk_copy <= scl_data;       // 单级同步
-
+      clk_copy <= scl_data;
 endmodule
 
-// ============================================================================
-// 模块：SYNC_C2S
-// 功能：通用多比特信号从 CLK 域同步到 SCL 域（单级同步器）。
-// ============================================================================
+// 下一个是直接从一个域到另一个域的同步
+// 用于本地使用 - 1 级触发器
 module SYNC_C2S #(parameter WIDTH=1) ( 
   input             rst_n,
-  input             scl,
-  input  [WIDTH-1:0] clk_data,
-  output [WIDTH-1:0] out_scl
-);
+  input             scl,        // 也可以是 SCL_n
+  input  [WIDTH-1:0]clk_data,
+  output [WIDTH-1:0]out_scl     // CLK 域内的输出副本
+  );
 
-  reg [WIDTH-1:0] scl_copy;
+  reg   [WIDTH-1:0] scl_copy;
 
   assign out_scl = scl_copy;
 
+  // 注意：可以使用 clk_copy ^ scl_data 作为测试以允许使用 ICG
   always @ (posedge scl or negedge rst_n)
     if (!rst_n)
       scl_copy <= {WIDTH{1'b0}};
     else 
       scl_copy <= clk_data;
-
 endmodule
 
-// ============================================================================
-// 模块：SYNC_AClr_C2S
-// 功能：将 CLK 域的信号（本地置位，异步清除）传递到 SCL 域，
-//       输出为电平信号（非脉冲）。
-//       常用于控制信号（如使能、复位等）。
-// ============================================================================
+// 下一个是本地置位以及从 CLK 到 SCL 的异步清除
 module SYNC_AClr_C2S(
-  input CLK,
+  input CLK, // 系统域
   input RSTn,
-  input local_set,      // CLK 域置位
-  input async_clear,    // 异步清除（可能来自 SCL 域）
-  output o_value        // SCL 域输出电平
-);
+  input local_set,
+  input async_clear,
+  output o_value);
 
-  reg value;
-
+  reg  value;                   // CLK 域
   always @ (posedge CLK or negedge RSTn)
     if (!RSTn)
       value <= 1'b0;
     else if (local_set) 
       value <= 1'b1;
-    else if (async_clear)
+    else if (async_clear) // CDC
       value <= 1'b0;
-
-  assign o_value = value;  // 直接输出，无额外同步（因已在 CLK 域处理）
+  assign o_value = value;
 
 endmodule

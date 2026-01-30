@@ -1,304 +1,215 @@
 /*--------------------------------------------------------------------
-  Copyright (C) 2015-2019, NXP B.V.
-  All rights reserved.
+  版权所有 (C) 2015-2019, NXP B.V.
+  保留所有权利。
   
-  Redistribution and use in source and binary forms, with or without 
-  modification, are permitted provided that the following conditions 
-  are met:
+  该 HDL 软件由版权持有者和贡献者“按原样”提供，不承诺任何明示或暗示的保证。
+  在任何情况下，版权持有者或贡献者均不对任何直接、间接、附带、特别、惩戒性或
+  后果性损害承担责任。
   
-  1. Redistributions of source code must retain the above copyright 
-     notice, this list of conditions and the following disclaimer.
-  
-  2. Redistributions in binary form must reproduce the above copyright 
-     notice, this list of conditions and the following disclaimer in
-     the documentation and/or other materials provided with the 
-     distribution.
-  
-  3. Neither the name of the copyright holder nor the names of its 
-     contributors may be used to endorse or promote products derived 
-     from this HDL software without specific prior written permission.
-  
-  THIS (HDL) SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
-  CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
-  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
-  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
-  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
-  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT 
-  NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
-  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
-  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
-  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
-  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, 
-  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-  NOTE: No license under any third-party patent is granted or implied. 
-        It is the responsibility of the licensee to obtain any required 
-        third-party patent licenses.
-
-  Note on terms used above:
-  1. Software and HDL software are used interchangeably.
-  2. Binary includes FPGA, simulation, and physical forms such 
-     as Silicon chips.
-  3. Clause 2 allows for such notice on a Web page or other 
-     electronic form not part of a distribution.
-  The original BSD source is available from:
-    https://github.com/NXP/i3c-slave-design
+  原始源码地址：https://github.com/NXP/i3c-slave-design
   -------------------------------------------------------------------- */
 
 //
 //  ----------------------------------------------------------------------------
-//                    Design Information
+//                     设计信息
 //  ----------------------------------------------------------------------------
-//  File            : i3c_slow_counters.v
-//  Organisation    : MCO
-//  Tag             : 1.1.11
-//  Date            : $Date: Wed Nov 13 19:04:07 2019 $
-//  Revision        : $Revision: 1.45 $
-//
-//  IP Name         : i3c_slow_counters 
-//  Description     : MIPI I3C counters for timing for Slave for both 
-//    uses like waiting on BusAvailable for IBI, as well as error detect
-//    and breakout. It also can count to 200us for Hot Join tIDLE
-//    This works off the slow clock. Not to be confused with the Time
-//    control features
+//  文件      : i3c_slow_counters.v
+//  组织      : MCO
+//  IP 名称   : i3c_slow_counters (MIPI I3C 从机低速计数器)
+//  描述      : 
+//    该模块用于实现 I3C 从机的定时功能，包括：
+//    1. 等待总线可用（Bus Available）以发起带内中断（IBI）。
+//    2. 错误检测与超时处理（如 S0/S1 状态机挂死检测）。
+//    3. 热加入（Hot Join）所需的 tIDLE 200us 等待。
+//    该模块运行在低速时钟（Slow Clock）域。
 //
 //  ----------------------------------------------------------------------------
-//                    Revision History
+//                     实现细节
 //  ----------------------------------------------------------------------------
-//
-//
-//  ----------------------------------------------------------------------------
-//                    Implementation details
-//  ----------------------------------------------------------------------------
-//  See the micro-arch spec and MIPI I3C spec
-//  ----------------------------------------------------------------------------
-// 
-//  Count model is as follows:
-//  1. We have a detector for bus idle (SCL not changing and
-//     in_STOP for all but Read).
-//  2. We have a 1us counter, which can be turned on from a
-//     variety of causes. It will be stopped and/or restarted 
-//     when the I3C SCL changes.
-//     -- Base use is Bus Available
-//  3. We have a 100us count model for 60us and 100us counts
-//     -- Two match points: 60us for S0/S1 end, 100us for Read stall
-//  4. We have a 200us count model (2 x 100us) for Hot Join
-//     -- This stops being used after 1st, so we have an input to
-//        say if new HJ (were powered off or super low power)
-//  NOTE: because the 1us may be inaccurate, we use the 1ms value to
-//        to determine 60us and 100us by approximation.
-//        We mainly care that it is not less, but more is OK.
-//        FUTURE: this could be reduced for 200us now that IDLE is not
-//        1ms anymore. But, we would need an old and new way for 
-//        backwards compatible uses.
+//  计数模型：
+//  1. 总线空闲检测（SCL 无变化且除读操作外处于 STOP 状态）。
+//  2. 1us 计数器：基础计时单位，用于计算总线可用时间（Bus Available）。当 SCL 变化时复位。
+//  3. 100us 计数模型：派生出 60us（S0/S1 结束检测）和 100us（读操作停顿检测）。
+//  4. 200us 计数模型：用于热加入（Hot Join）。
 //  ----------------------------------------------------------------------------
 
-`include "i3c_params.v"                 // local parameters/constants
+`include "i3c_params.v"                 // 包含本地参数/常量
 
 module i3c_slow_counters #(
-    // params are driven from upper layer to control how this block
-    // is built and operates
-    parameter ENA_IBI_MR_HJ   = 0,      // 0 if no events, else events as mask
-    parameter  CLK_SLOW_BITS  = 6,      // number of bits needed for count for Bus Avail
-    parameter  CLK_SLOW_MATCH = 6'd47,  // count: e.g. 47 for 1us if 48MHz CLK (0 rel)
-    parameter  CLK_SLOW_HJMUL = 10'd1000,// number of MATCHes (const or reg) for 1ms (1 rel)
-    parameter  ENA_TIMEC      = 6'b000010,    // clock_reg, res, res, mode 1, mode 0, sync
-    parameter  TIMEC_FREQ_ACC = {8'd24,8'd10},// freq=12MHz (12.0=24) with 1.0% accuracy
-    parameter ENA_CCC_HANDLING= 6'd0    // passed down as to what to support
+    parameter ENA_IBI_MR_HJ   = 0,      // 事件使能掩码：0 表示无事件
+    parameter CLK_SLOW_BITS   = 6,      // 总线可用计数所需的位数
+    parameter CLK_SLOW_MATCH  = 6'd47,  // 1us 计数值（例如 48MHz 时为 47）
+    parameter CLK_SLOW_HJMUL  = 10'd1000,// 1ms 所需的匹配次数
+    parameter ENA_TIMEC       = 6'b000010, 
+    parameter TIMEC_FREQ_ACC  = {8'd24,8'd10},
+    parameter ENA_CCC_HANDLING= 6'd0    
   )
   (
-  // define clock and reset
-  input               RSTn,             // reset from system
-  input               CLK_SLOW,         // clock to use for IBI forced
-  output              slow_gate,        // 1 if may gate CLK_SLOW
-  input               clk_SCL,          // SCL clock 
-  input               clk_SCL_n,        // SCL clock inverted
-  // match clock counts
-  input               cf_SlvEna,        // only process bus if 1
-  input         [7:0] cf_BAMatch,       // Bus Available count match (if IBI+BAM)
-  // requests to run the counters
-  input         [2:0] event_pending,    // IBI, MR, or HJ
-  input               run_60,           // S0/S1 stall
-  input               run_100,          // Read stuck check
-  // state detection 
-  input               int_in_STOP,      // sync: in stop mode
-  input               pin_SCL_in,       // used for state detect
-  input               pin_SDA_in,       // used for state detect
-  // now outputs to trigger actions
-  output              force_sda,        // force SDA for IBI, MR, or HJ
-  output              done_60,          // done with S0/S1
-  output              done_100,         // done with read abort
-  output              hold_engine       // hold off engine until HJ emits start
+  input               RSTn,             // 系统复位
+  input               CLK_SLOW,         // 低速时钟（用于 IBI 强制触发）
+  output              slow_gate,        // 低速时钟门控标志（1 表示可关闭时钟以省电）
+  input               clk_SCL,          // SCL 时钟
+  input               clk_SCL_n,        // SCL 时钟反相
+  input               cf_SlvEna,        // 从机总线处理使能信号
+  input         [7:0] cf_BAMatch,       // 总线可用（Bus Available）匹配值
+  input         [2:0] event_pending,    // 挂起事件：IBI, 主机请求(MR), 或 热加入(HJ)
+  input               run_60,           // 运行 60us S0/S1 停顿检测
+  input               run_100,          // 运行 100us 读挂死检测
+  input               int_in_STOP,      // 同步后的 STOP 状态信号
+  input               pin_SCL_in,       // SCL 引脚输入（用于状态检测）
+  input               pin_SDA_in,       // SDA 引脚输入（用于状态检测）
+  output              force_sda,        // 触发 IBI/MR/HJ 时拉低 SDA
+  output              done_60,          // 60us 计时完成
+  output              done_100,         // 100us 计时完成
+  output              hold_engine       // 保持引擎直到 HJ 发出 START
   );
 
-  //
-  // Table of contents
-  //
-  // 1. Request for counting controls for each reason
-  // 2. Counter for 1us
-  // 3. Detection of SCL state to detect clocks across clock domain
-  // 4. Mid rate counter for 100us and 60us
-  // 5. Hot-Join counter of 100us periods
-
-
+  // 内部信号定义
   wire                    run_cnt, run_hotjoin;
   wire                    is_1us;
   wire                    is_hj;
-  reg [CLK_SLOW_BITS-1:0] microsec_cnt;
-  reg               [6:0] mid_cnt;      // max 127 reload
-  reg               [1:0] hj_cnt;       // max of 2
-  reg                     hj_done;      // only do HJ once after power up
+  reg [CLK_SLOW_BITS-1:0] microsec_cnt; // 微秒级计数器
+  reg               [6:0] mid_cnt;      // 中级计数器（最大 127）
+  reg               [1:0] hj_cnt;       // HJ 计数器
+  reg                     hj_done;      // 标记上电后 HJ 是否已执行
   reg                     request_start, check_idle_n, check_idle;
   wire                    remote_check_idle, remote_check_idle_n;
   reg                     scl_check_idle, scl_check_idle_n;
   wire                    sclsda_state;
   wire                    safe_ibi_hj;
 
+  // 运行控制逻辑
   assign run_cnt     = |event_pending[1:0] | run_60 | run_100 | run_hotjoin;
   assign run_hotjoin = &event_pending[1:0] & ENA_IBI_MR_HJ[`EV_HJ_b];
-    // next makes sure SCL and SDA are high for IBI and  HJ. Note state vs. 
-    // in_STOP since in_STOP does not clear until complete START
-    // note: test below allows run_60/100 to override event_pending since 
-    //       pending does not mean we are in STOP yet
-  wire   is_stop     = int_in_STOP &    // HJ inits to in_STOP
-                       (sclsda_state | force_sda); 
+  
+  // 确保 IBI 和 HJ 触发前 SCL 和 SDA 均为高电平（处于 STOP 状态）
+  wire   is_stop     = int_in_STOP & (sclsda_state | force_sda); 
   assign safe_ibi_hj = (~|event_pending[1:0] | run_60 | run_100) | is_stop;
-  // we gate the clock unless need it or finishing up counters
+  
+  // 门控逻辑：如果不需要计时且计数器已清零，则可关闭 CLK_SLOW
   assign slow_gate   = ~(run_cnt | (|microsec_cnt) | request_start | (|mid_cnt));
-  // we notify when ready to pull SDA low (IBI, MR, HJ)
+  
+  // SDA 强制拉低逻辑：用于发起 IBI、MR 或 HJ
   assign force_sda   = request_start &
                        ((|event_pending[1:0] & ~&event_pending[1:0] & is_1us) |
                         is_hj);
 
-  // we define the 1us (Bus Available) match as const or MMR
+  // 1us 匹配逻辑：支持常量匹配或 MMR 寄存器配置匹配
   generate if (ENA_IBI_MR_HJ[`EV_BAMATCH_b]) begin : ba_math
     assign is_1us = microsec_cnt == cf_BAMatch[CLK_SLOW_BITS-1:0];
   end else begin
     assign is_1us = microsec_cnt == CLK_SLOW_MATCH[CLK_SLOW_BITS-1:0];
   end endgenerate
 
-    
+  // 1us 基础计数器逻辑
   always @ (posedge CLK_SLOW or negedge RSTn)
     if (~RSTn) 
       microsec_cnt   <= {CLK_SLOW_BITS{1'b0}};
     else if (~request_start & |microsec_cnt)
       microsec_cnt   <= {CLK_SLOW_BITS{1'b0}};
-    else if (request_start)             // if bus stall, 1 shot or free running
+    else if (request_start) 
       if (~|is_1us)
         microsec_cnt <= microsec_cnt + {{CLK_SLOW_BITS-1{1'b0}},1'b1};
-      else if (run_60 | run_100 | 
-               (run_hotjoin & ~hj_done)) 
-        microsec_cnt <= {CLK_SLOW_BITS{1'b0}}; // free running
+      else if (run_60 | run_100 | (run_hotjoin & ~hj_done)) 
+        microsec_cnt <= {CLK_SLOW_BITS{1'b0}}; // 循环计数模式
 
+  // 计数器启动与总线空闲检测
   always @ (posedge CLK_SLOW or negedge RSTn)
     if (~RSTn) begin
       check_idle      <= 1'b0;
       check_idle_n    <= 1'b0;
       request_start   <= 1'b0;
     end else if (run_cnt & cf_SlvEna & safe_ibi_hj) begin
-      // We use STOP & SCL=1/SDA=1 for Bus Avail and HJ, but just requesting state 
-      // for the read abort and S0/S1 error; no risk since they wait for long enough
-      // with no clock change to be sure not in SDR and HDR-DDR respectievly
-      // We are here for IBI, MR, HJ, stall detect, or s0/s1 condition
+      // 检测 SCL 是否发生翻转。如果 check 信号与 remote 信号不再匹配，说明 SCL 发生了变化
       if ((check_idle   == remote_check_idle) | 
           (check_idle_n == remote_check_idle_n)) begin
-        // SCL must have changed, so we start over
-        check_idle    <= ~remote_check_idle;   // (!=) so we can tell if change happened
-        check_idle_n  <= ~remote_check_idle_n; // "
-        request_start <= 1'b0;          // can start over below
+        check_idle    <= ~remote_check_idle;   // 重新开始计时，标记 SCL 有变动
+        check_idle_n  <= ~remote_check_idle_n; 
+        request_start <= 1'b0;                 // 重新启动计数
       end else if (~request_start) begin
-        // we set our flag 1st
-        request_start <= 1'b1;          // kick off timer
+        request_start <= 1'b1;                 // 启动计时器
       end 
     end else begin
-      check_idle      <= remote_check_idle; // match - ready for next time
+      check_idle      <= remote_check_idle; 
       check_idle_n    <= remote_check_idle_n;
       request_start   <= 1'b0;
     end
 
-  // bus inactive check is used to make sure no clocks go by. This provides
-  // safety for measuring time the bus is idle using a slow clock. 
-  // The app sets the iCheckIdle to ~oCheckIdleNot. If on the next 
-  // tick (or some time later) it is still the opposite, there were 
-  // no SCL clocks. If it is matching, then SCL has changed.
-  // we handle both clock edges. Note that we do not disable the below
-  // since it will stabilize
+  // 跨时钟域（CDC）总线活动检测：用于确保在测量空闲时间时没有 SCL 时钟产生
   always @ (posedge clk_SCL or negedge RSTn)
     if (!RSTn)
       scl_check_idle <= 1'b0;
-    else if (scl_check_idle ^ check_idle)  // CDC
-      scl_check_idle <= ~scl_check_idle;   // match
+    else if (scl_check_idle ^ check_idle)  
+      scl_check_idle <= ~scl_check_idle;   // 与 slow clock 域信号同步
   always @ (posedge clk_SCL_n or negedge RSTn)
     if (!RSTn)
       scl_check_idle_n <= 1'b0;
-    else if (scl_check_idle_n ^ check_idle_n)// CDC
-      scl_check_idle_n <= ~scl_check_idle_n; // match
+    else if (scl_check_idle_n ^ check_idle_n)
+      scl_check_idle_n <= ~scl_check_idle_n; 
+
+  // 同步器实例化：将 SCL 域信号同步回 CLK_SLOW 域
   SYNC_S2C #(.WIDTH(1)) sync_idle_check(.rst_n(RSTn), .clk(CLK_SLOW), .scl_data(scl_check_idle), 
-                                .out_clk(remote_check_idle));
+                                 .out_clk(remote_check_idle));
   SYNC_S2C #(.WIDTH(1)) sync_idle_check_n(.rst_n(RSTn), .clk(CLK_SLOW), .scl_data(scl_check_idle_n), 
-                                  .out_clk(remote_check_idle_n));
-    // next two track state
+                                   .out_clk(remote_check_idle_n));
   SYNC_S2C #(.WIDTH(1)) sync_sclsda_state(.rst_n(RSTn), .clk(CLK_SLOW), .scl_data(pin_SCL_in&pin_SDA_in), 
-                                  .out_clk(sclsda_state));
+                                   .out_clk(sclsda_state));
 
-  // now we build the 100us and 60us counters. 
-  // we build counts by rounding up from 1ms info
-  localparam LOAD_100 = (CLK_SLOW_HJMUL+9)/10;  // from 1ms to ~100us
-  localparam LOAD_60  = (CLK_SLOW_HJMUL+15)/16; // from 1ms to ~60us
+  // 100us 和 60us 计数器逻辑
+  // 通过 1ms 的参数值换算得出
+  localparam LOAD_100 = (CLK_SLOW_HJMUL+9)/10;  // 1ms 的 1/10
+  localparam LOAD_60  = (CLK_SLOW_HJMUL+15)/16; // 1ms 的 1/16 (约为 60us)
   wire [0:0] bad_load;
-  assign     bad_load[LOAD_100>127] = 1'b0; // catches overflow
+  assign     bad_load[LOAD_100>127] = 1'b0; 
 
-  // counter is one-shot or free run depending on use
   always @ (posedge CLK_SLOW or negedge RSTn)
     if (~RSTn) 
       mid_cnt       <= 7'd0;
     else if (~run_60 & ~run_100 & ~run_hotjoin) begin
-      if (|mid_cnt)
-        mid_cnt     <= 7'd0;
+      if (|mid_cnt) mid_cnt <= 7'd0;
     end else begin
       if (~request_start)
-        mid_cnt     <= 7'd0;            // condition changed, reset cnt
+        mid_cnt     <= 7'd0;                // 条件变化时重置
       else if (is_1us) begin
         if (run_60) begin
-          // 60us is one shot
           if (mid_cnt != LOAD_60)
-            mid_cnt <= mid_cnt + 7'd1;  // count untol 60us
+            mid_cnt <= mid_cnt + 7'd1;      // 增加至 60us
         end else if (mid_cnt != LOAD_100)
-          mid_cnt   <= mid_cnt + 7'd1;  // count untol 60us
+          mid_cnt   <= mid_cnt + 7'd1;      // 增加至 100us
         else if (run_hotjoin)
-          mid_cnt   <= 7'd0;            // hot join is free run until 10ms
+          mid_cnt   <= 7'd0;                // HJ 模式下循环计数
       end
     end
-  // we notify when 60us or 100us timing done
+    
   assign done_100  = (run_100 & (mid_cnt==LOAD_100));
   assign done_60   = (run_60  & (mid_cnt==LOAD_60));
 
-  // now Hot Join, if enabled. This uses 2 of the 100us counts (200us)
+  // 热加入 (Hot Join) 专用逻辑
+  // 协议要求上电后等待 200us (即 2 个 100us 周期)
   always @ (posedge CLK_SLOW or negedge RSTn)
     if (~RSTn) begin 
       hj_cnt       <= 2'd0;
-      hj_done      <= 1'b0;             // only once after POR
+      hj_done      <= 1'b0;                 // 仅在 POR（上电复位）后执行一次
     end else if (~run_hotjoin) begin
-      if (|hj_cnt)
-        hj_cnt     <= 2'd0;
+      if (|hj_cnt) hj_cnt <= 2'd0;
     end else if (~hj_done) begin
       if (~request_start)
-        hj_cnt     <= 2'd0;             // condition changed, reset cnt
+        hj_cnt     <= 2'd0;
       else if (is_1us & (mid_cnt==LOAD_100)) begin
-        // we only count 200us once; after that we use hj_done so like IBI
         if (hj_cnt != 2'd2) begin
           hj_cnt   <= hj_cnt + 2'd1;
-          if (hj_cnt[0]) begin          // Done once we have started
-            hj_done  <= 1'b1;           // one and done
-            hj_cnt   <= 2'd0;           // not needed, done does it all
+          if (hj_cnt[0]) begin              // 完成 2 个周期
+            hj_done  <= 1'b1;               // 标记已完成一次性等待
+            hj_cnt   <= 2'd0; 
           end
         end
       end
     end
+
+  // HJ 准备就绪信号
   assign is_hj = run_hotjoin & (hj_done & is_1us);
 
-  // hold engine is because HotJoin means bus state unknown
+  // 阻塞引擎：在 HJ 未完成 200us 等待前，总线状态未知，需保持引擎挂起
   assign hold_engine = run_hotjoin & ~hj_done;
 
 endmodule
