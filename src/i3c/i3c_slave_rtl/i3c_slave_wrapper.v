@@ -33,7 +33,7 @@ module i3c_slave_wrapper #(
     parameter ENA_TIMEC       = 6'b000010,    // 如果寄存器，res, res, 模式1, 模式0, 同步
     parameter TIMEC_FREQ_ACC  = {8'd24,8'd10},// 频率为12MHz（12.0=24）精度为1.0%
     parameter priv_sz         = PIN_MODEL[1] ? (ENA_HDR[0] ? 3 : 1) : 0,// 如果ext-pad+ddr则更宽
-    parameter [7:0] PID_CNT   = MAP_DA_AUTO[`MAPDA_DAA_PID_lb+4:`MAPDA_DAA_PID_lb], // 计算得出
+    parameter [7:0] PID_CNT   = 8'b1;//MAP_DA_AUTO[`MAPDA_DAA_PID_lb+4:`MAPDA_DAA_PID_lb], // 计算得出
     parameter SLV_DBG_MX      = 0       // 调试观察器
   )
   (

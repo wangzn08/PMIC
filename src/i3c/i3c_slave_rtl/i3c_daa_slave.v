@@ -24,7 +24,7 @@ module i3c_daa_slave #(
     parameter         MAP_DA_DAA= 0,    // 如果不是 MMR 且 PID/DCR !=0，则为位数组
     parameter         PIN_MODEL = `PINM_COMBO, // 组合引脚使用模式
     // 以下为计算值
-    parameter  [7:0]  PID_CNT = MAP_DA_AUTO[`MAPDA_DAA_PID_lb+4:`MAPDA_DAA_PID_lb]
+    parameter  [7:0]  PID_CNT = 8'b1;//MAP_DA_AUTO[`MAPDA_DAA_PID_lb+4:`MAPDA_DAA_PID_lb]
   )
   (
   // 时钟、复位和来自外部的引脚输入
